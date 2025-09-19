@@ -368,17 +368,56 @@ class RiceApp:
         self.canvas_input.image = tk_img
 
     def process(self, img):
+        """
+        Hàm xử lý ảnh chính - thực hiện pipeline hoàn chỉnh để đếm hạt gạo
+        Pipeline bao gồm 6 bước chính với các phép biến đổi toán học cụ thể
+        """
         self.clear_outputs()
-        # 1. Ảnh gốc - hiển thị với kích thước lớn hơn để dễ nhìn thấy các hạt nhỏ
+        
+        # ========================================
+        # BƯỚC 1: HIỂN THỊ ẢNH GỐC
+        # ========================================
+        # Mục đích: Hiển thị ảnh đầu vào để người dùng có thể so sánh với kết quả
+        # Không có phép biến đổi toán học, chỉ là hiển thị trực quan
         self.add_output(img, "Ảnh gốc", size=(400, 400))
 
-        # 2. Ảnh xám
+        # ========================================
+        # BƯỚC 2: CHUYỂN ĐỔI MÀU SẮC (COLOR SPACE CONVERSION)
+        # ========================================
+        # Phép biến đổi: BGR → Grayscale
+        # Công thức toán học: Gray = 0.299*R + 0.587*G + 0.114*B (Weighted Average)
+        # Mục đích: Giảm chiều dữ liệu từ 3D (B,G,R) xuống 1D (Gray)
+        # Lý do: Các thuật toán xử lý ảnh thường hoạt động tốt hơn trên ảnh xám
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)  # Chuyển lại để hiển thị
         self.add_output(gray_bgr, "Ảnh xám")
-        
 
-        # 3. Làm nét
+        # ========================================
+        # BƯỚC 3: TIỀN XỬ LÝ VÀ TĂNG CƯỜNG ẢNH (IMAGE ENHANCEMENT)
+        # ========================================
+        # Các phép biến đổi toán học được thực hiện trong preprocess_image():
+        # 
+        # 3.1. Top-hat Morphology:
+        #    - Top-hat = Original - Opening(Original)
+        #    - Opening = Dilation(Erosion(Original))
+        #    - Mục đích: Tách các đối tượng nhỏ, sáng khỏi nền tối
+        #    - Kernel size: (15,15) - kích thước cấu trúc để phát hiện hạt gạo
+        #
+        # 3.2. Gaussian Blur:
+        #    - Công thức: G(x,y) = (1/(2πσ²)) * e^(-(x²+y²)/(2σ²))
+        #    - Kernel size: (3,3), σ = 0 (tự động tính)
+        #    - Mục đích: Làm mịn nhiễu, chuẩn bị cho bước phân đoạn
+        #
+        # 3.3. CLAHE (Contrast Limited Adaptive Histogram Equalization):
+        #    - Chia ảnh thành các tile nhỏ (8x8)
+        #    - Áp dụng histogram equalization cho mỗi tile
+        #    - Clip limit: 2.0 (giới hạn độ tương phản để tránh nhiễu)
+        #    - Mục đích: Tăng cường độ tương phản cục bộ
+        #
+        # 3.4. Dynamic Parameter Adjustment:
+        #    - Phân tích độ sáng: mean, median, std của pixel values
+        #    - Điều chỉnh CLAHE clip limit dựa trên brightness level
+        #    - Dark images: clip_limit *= 2.0, Very dark: *= 3.0
         enhanced, brightness_info = preprocess_image(img)
         enhanced_bgr = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
         
@@ -386,11 +425,30 @@ class RiceApp:
         brightness_text = f"Độ sáng: {brightness_info['brightness_level']} (TB: {brightness_info['mean_brightness']:.1f})"
         self.add_output(enhanced_bgr, f"Làm nét - {brightness_text}")
 
-        # 4. Nhị phân - thử cả hai phương pháp
+        # ========================================
+        # BƯỚC 4: PHÂN ĐOẠN ẢNH (IMAGE SEGMENTATION)
+        # ========================================
+        # Thử cả hai phương pháp và chọn phương pháp tốt nhất:
+        
+        # 4.1. Otsu Thresholding:
+        #    - Thuật toán: Tìm threshold tối ưu để minimize intra-class variance
+        #    - Công thức: σ²w(t) = w₀(t)σ₀²(t) + w₁(t)σ₁²(t)
+        #    - Tìm t* sao cho: t* = argmin(σ²w(t))
+        #    - Ưu điểm: Tự động, không cần tham số
         binary_otsu = segment_otsu(enhanced)
+        
+        # 4.2. Adaptive Thresholding:
+        #    - Thuật toán: Threshold cục bộ cho từng vùng
+        #    - Công thức: T(x,y) = mean(neighborhood) - C
+        #    - Block size: 21x21 (kích thước neighborhood)
+        #    - C constant: 2 (giá trị trừ đi từ mean)
+        #    - Ưu điểm: Xử lý tốt ảnh có độ sáng không đều
         binary_adaptive = segment_adaptive(enhanced)
         
-        # So sánh và chọn phương pháp tốt nhất
+        # 4.3. So sánh và chọn phương pháp tốt nhất:
+        #    - Tìm contours từ cả hai phương pháp
+        #    - Lọc contours có diện tích >= 20 pixels
+        #    - Chọn phương pháp có nhiều valid contours hơn
         contours_otsu, _ = cv2.findContours(binary_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours_adaptive, _ = cv2.findContours(binary_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -408,17 +466,89 @@ class RiceApp:
         binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
         self.add_output(binary_bgr, f"Nhị phân ({method_used})")
 
-        # 5. Làm sạch & tách hạt
+        # ========================================
+        # BƯỚC 5: HẬU XỬ LÝ VÀ TÁCH HẠT (POST-PROCESSING & SEPARATION)
+        # ========================================
+        # Các phép biến đổi toán học trong postprocess():
+        #
+        # 5.1. Border Expansion:
+        #    - Thêm border 10 pixels xung quanh ảnh
+        #    - Mục đích: Xử lý các hạt ở biên ảnh
+        #
+        # 5.2. Morphological Opening:
+        #    - Opening = Dilation(Erosion(binary))
+        #    - Kernel: (3,3), iterations: 1
+        #    - Mục đích: Loại bỏ nhiễu nhỏ, tách các hạt dính nhau
+        #
+        # 5.3. Distance Transform:
+        #    - Tính khoảng cách từ mỗi pixel đến biên gần nhất
+        #    - Công thức: DT(x,y) = min{√((x-i)² + (y-j)²) | (i,j) ∈ background}
+        #    - Mục đích: Tìm các điểm "trung tâm" của hạt
+        #
+        # 5.4. Watershed Algorithm:
+        #    - Sử dụng distance transform làm marker
+        #    - Threshold ratio: 0.3 (30% của max distance)
+        #    - Thuật toán: Flood fill từ các marker để tách các hạt
+        #
+        # 5.5. Edge Grain Restoration:
+        #    - Phân tích geometric properties: aspect ratio, circularity, compactness
+        #    - Aspect ratio = max(width, height) / min(width, height)
+        #    - Circularity = 4π*Area / Perimeter²
+        #    - Compactness = Area / (π * (Perimeter/(2π))²)
+        #    - Khôi phục các hạt ở biên có properties hợp lý
         cleaned = postprocess(binary)
         cleaned_bgr = cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
         self.add_output(cleaned_bgr, "Làm sạch & tách hạt")
 
-        # 6. Kết quả cuối
+        # ========================================
+        # BƯỚC 6: ĐẾM VÀ HIỂN THỊ KẾT QUẢ (COUNTING & VISUALIZATION)
+        # ========================================
+        # 6.1. Contour Analysis:
+        #    - Tìm tất cả contours từ ảnh đã xử lý
+        #    - Tính diện tích: Area = ∫∫ dx dy (tích phân kép)
+        #    - Lọc contours dựa trên diện tích tối thiểu
+        #
+        # 6.2. Dynamic Thresholding:
+        #    - Tính median area của tất cả contours
+        #    - Dynamic min_area = median_area * 0.25 (25% của median)
+        #    - Edge threshold = median_area * 0.12 (12% của median)
+        #    - Mục đích: Thích ứng với kích thước hạt khác nhau
+        #
+        # 6.3. Geometric Validation:
+        #    - Kiểm tra aspect ratio ≤ 2.5 (không quá dài)
+        #    - Kiểm tra circularity ≥ 0.4 (gần hình tròn)
+        #    - Kiểm tra compactness ≥ 0.5 (độ đặc chắc)
+        #
+        # 6.4. Visualization:
+        #    - Vẽ contours lên ảnh gốc
+        #    - Hiển thị số thứ tự cho mỗi hạt
+        #    - Tính toán thống kê: count, avg_area, max_area
         count, avg_area, max_area, contours = count_rice_grains(cleaned)
         result = draw_output(cleaned, contours)
         self.add_output(result, "Kết quả cuối")
         
-        # Debug: Hiển thị tất cả contour với ngưỡng thấp để thấy các hạt nhỏ
+        # ========================================
+        # BƯỚC 7: PHÂN TÍCH VÀ HIỂN THỊ DEBUG (DEBUG ANALYSIS & VISUALIZATION)
+        # ========================================
+        # Mục đích: Phân tích chi tiết kết quả xử lý để debug và tối ưu hóa thuật toán
+        # KHÔNG phải chỉ hiển thị UI - đây là bước phân tích toán học quan trọng
+        #
+        # 7.1. Contour Detection và Area Analysis:
+        #    - Tìm TẤT CẢ contours từ ảnh đã xử lý (không lọc theo min_area)
+        #    - Tính diện tích của từng contour: Area = ∫∫ dx dy
+        #    - Mục đích: Hiểu được phân bố kích thước của các đối tượng trong ảnh
+        #
+        # 7.2. Statistical Analysis:
+        #    - Tính median area: giá trị trung vị của tất cả diện tích
+        #    - Median = giá trị ở giữa khi sắp xếp tăng dần
+        #    - Mục đích: Tìm kích thước "điển hình" của hạt gạo trong ảnh này
+        #
+        # 7.3. Low-threshold Visualization:
+        #    - Hiển thị contours có diện tích >= 10% của median area
+        #    - Threshold = median_area * 0.1 (rất thấp để thấy các hạt nhỏ)
+        #    - Mục đích: Kiểm tra xem có hạt nhỏ nào bị bỏ sót không
+        #    - Giúp debug: Nếu thấy nhiều hạt nhỏ trong debug nhưng ít trong kết quả cuối
+        #      → có thể min_area quá cao hoặc thuật toán filtering quá strict
         all_contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         all_areas = [cv2.contourArea(cnt) for cnt in all_contours if cv2.contourArea(cnt) > 0]
         
@@ -429,7 +559,27 @@ class RiceApp:
             debug_result = draw_output(cleaned, debug_contours)
             self.add_output(debug_result, f"Debug: Tất cả hạt (≥10% median={median_area:.1f})")
         
-        # Thông tin debug về các ngưỡng khác nhau
+        # ========================================
+        # BƯỚC 8: PHÂN TÍCH THỐNG KÊ NGƯỠNG (THRESHOLD STATISTICAL ANALYSIS)
+        # ========================================
+        # Mục đích: Phân tích toán học về hiệu quả của các ngưỡng khác nhau
+        # KHÔNG phải chỉ hiển thị UI - đây là phân tích thống kê để tối ưu thuật toán
+        #
+        # 8.1. Multi-threshold Analysis:
+        #    - Thử các ngưỡng khác nhau: 10%, 20%, 50%, 100% của median area
+        #    - Đếm số lượng contours ở mỗi ngưỡng
+        #    - Mục đích: Hiểu được độ nhạy của thuật toán với các ngưỡng khác nhau
+        #
+        # 8.2. Algorithm Optimization Insights:
+        #    - Nếu count_10 >> count_100: có nhiều hạt nhỏ bị lọc bỏ
+        #    - Nếu count_10 ≈ count_100: thuật toán đã chọn ngưỡng hợp lý
+        #    - Nếu count_20 >> count_50: có nhiều hạt trung bình
+        #    - Giúp điều chỉnh dynamic_min_area và edge_threshold trong config
+        #
+        # 8.3. Quality Assessment:
+        #    - Tỷ lệ count_50/count_10: đo độ "clean" của segmentation
+        #    - Tỷ lệ count_100/count_10: đo độ "strict" của filtering
+        #    - Mục đích: Đánh giá chất lượng của pipeline xử lý ảnh
         all_contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         all_areas = [cv2.contourArea(cnt) for cnt in all_contours if cv2.contourArea(cnt) > 0]
         
@@ -443,7 +593,35 @@ class RiceApp:
             
             debug_info = f"Debug: ≥10%={count_10}, ≥20%={count_20}, ≥50%={count_50}, ≥100%={count_100}"
         
-        # Phân tích các hạt ở biên
+        # ========================================
+        # BƯỚC 9: PHÂN TÍCH HẠT Ở BIÊN (EDGE GRAIN ANALYSIS)
+        # ========================================
+        # Mục đích: Phân tích toán học về các hạt ở biên ảnh
+        # KHÔNG phải chỉ hiển thị UI - đây là phân tích geometric quan trọng
+        #
+        # 9.1. Geometric Edge Detection:
+        #    - Tính bounding rectangle cho mỗi contour: (x, y, width, height)
+        #    - Kiểm tra vị trí của rectangle so với biên ảnh
+        #    - Công thức: is_near_edge = (x < margin OR y < margin OR 
+        #                                  x + w > width - margin OR 
+        #                                  y + h > height - margin)
+        #    - margin = 10 pixels (từ PostprocessingConfig.EDGE_MARGIN)
+        #
+        # 9.2. Edge Grain Counting:
+        #    - Đếm số hạt có bounding box gần biên ảnh
+        #    - Mục đích: Đánh giá hiệu quả của thuật toán xử lý biên
+        #    - Nếu edge_grains/count cao: nhiều hạt ở biên → cần cải thiện border expansion
+        #    - Nếu edge_grains/count thấp: ít hạt ở biên → thuật toán hoạt động tốt
+        #
+        # 9.3. Algorithm Validation:
+        #    - So sánh với kết quả từ postprocess() (đã có border expansion)
+        #    - Kiểm tra xem border expansion có hiệu quả không
+        #    - Giúp điều chỉnh BORDER_SIZE và EDGE_MARGIN trong config
+        #
+        # 9.4. Quality Metrics:
+        #    - Tỷ lệ edge_grains/total_count: đo độ "edge-sensitive" của thuật toán
+        #    - Nếu tỷ lệ cao: thuật toán nhạy với hạt ở biên
+        #    - Nếu tỷ lệ thấp: thuật toán ổn định với hạt ở biên
         edge_grains = 0
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
